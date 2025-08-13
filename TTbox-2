@@ -1,3 +1,4 @@
+import os
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     ApplicationBuilder,
@@ -9,22 +10,27 @@ from telegram.ext import (
 )
 
 # 狀態定義
-CHOOSING, SET_DATE, ADD_NAMES, DELETE_NAME, CLEAR_ALL = range(5)
+CHOOSING, SET_DATE, ADD_NAMES, DELETE_NAME, CLEAR_ALL, ADD_BLACKLIST, DELETE_BLACKLIST = range(7)
 
 date_setting = None
 name_list = []
+blacklist = []
 
 # 幫助函式：發訊息並記錄訊息id
 async def send_and_record(update: Update, context: ContextTypes.DEFAULT_TYPE, text, **kwargs):
     msg = await update.message.reply_text(text, **kwargs)
-    # 紀錄訊息ID方便後續刪除
     if 'messages_to_delete' not in context.user_data:
         context.user_data['messages_to_delete'] = []
     context.user_data['messages_to_delete'].append(msg.message_id)
     return msg
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reply_keyboard = [['設定日期', '新增名單'], ['刪除名單', '顯示名單'], ['清除對話紀錄']]
+    reply_keyboard = [
+        ['設定日期', '新增名單'],
+        ['刪除名單', '新增黑名單'],
+        ['刪除黑名單', '顯示名單'],
+        ['清除對話紀錄']
+    ]
     await send_and_record(
         update,
         context,
@@ -40,32 +46,31 @@ async def choosing(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await send_and_record(update, context, '請輸入日期（格式：YYYY-MM-DD）', reply_markup=ReplyKeyboardRemove())
         return SET_DATE
     elif text == '新增名單':
-        await send_and_record(
-            update,
-            context,
-            '請輸入要新增的名字，使用空白（空格、換行等）分隔多個名字\n例如：\n張三 李四 王五',
-            reply_markup=ReplyKeyboardRemove(),
-        )
+        await send_and_record(update, context, '請輸入要新增的名字（空白分隔）', reply_markup=ReplyKeyboardRemove())
         return ADD_NAMES
     elif text == '刪除名單':
         if not name_list:
             await send_and_record(update, context, '名單是空的，無法刪除')
             return CHOOSING
-        else:
-            await send_and_record(update, context, '請輸入要刪除的名字，使用空白分隔多個名字', reply_markup=ReplyKeyboardRemove())
-            return DELETE_NAME
+        await send_and_record(update, context, '請輸入要刪除的名字（空白分隔）', reply_markup=ReplyKeyboardRemove())
+        return DELETE_NAME
+    elif text == '新增黑名單':
+        await send_and_record(update, context, '請輸入要加入黑名單的名字（空白分隔）', reply_markup=ReplyKeyboardRemove())
+        return ADD_BLACKLIST
+    elif text == '刪除黑名單':
+        if not blacklist:
+            await send_and_record(update, context, '黑名單是空的，無法刪除')
+            return CHOOSING
+        await send_and_record(update, context, '請輸入要刪除的黑名單名字（空白分隔）', reply_markup=ReplyKeyboardRemove())
+        return DELETE_BLACKLIST
     elif text == '顯示名單':
-        msg = f"設定日期：{date_setting if date_setting else '尚未設定'}\n名單：\n"
-        msg += "\n".join(name_list) if name_list else "(空)"
+        msg = f"設定日期：{date_setting if date_setting else '尚未設定'}\n\n" \
+              f"名單：\n" + ("\n".join(name_list) if name_list else "(空)") + \
+              f"\n\n黑名單：\n" + ("\n".join(blacklist) if blacklist else "(空)")
         await send_and_record(update, context, msg)
         return CHOOSING
     elif text == '清除對話紀錄':
-        await send_and_record(
-            update,
-            context,
-            "確定要清除之前機器人發送的所有訊息紀錄嗎？\n請輸入 '是' 確認，或其他文字取消",
-            reply_markup=ReplyKeyboardRemove(),
-        )
+        await send_and_record(update, context, "確定要清除之前機器人發送的訊息紀錄嗎？輸入 '是' 確認", reply_markup=ReplyKeyboardRemove())
         return CLEAR_ALL
     else:
         await send_and_record(update, context, "請使用鍵盤按鈕選擇操作")
@@ -87,13 +92,13 @@ async def add_names(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global name_list
     import re
     text = update.message.text.strip()
-    new_names = re.split(r'\s+', text)
-    new_names = [name.strip() for name in new_names if name.strip()]
+    new_names = [n for n in re.split(r'\s+', text) if n]
 
-    added = []
-    existed = []
+    added, existed, in_blacklist = [], [], []
     for name in new_names:
-        if name in name_list:
+        if name in blacklist:
+            in_blacklist.append(name)
+        elif name in name_list:
             existed.append(name)
         else:
             name_list.append(name)
@@ -103,7 +108,9 @@ async def add_names(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if added:
         msg += "新增成功：\n" + "\n".join(added) + "\n"
     if existed:
-        msg += "以下名字已存在：\n" + "\n".join(existed)
+        msg += "已在名單：\n" + "\n".join(existed) + "\n"
+    if in_blacklist:
+        msg += "在黑名單中，無法加入：\n" + "\n".join(in_blacklist)
     if not msg:
         msg = "沒有新增任何名字。"
 
@@ -114,11 +121,9 @@ async def delete_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     global name_list
     import re
     text = update.message.text.strip()
-    del_names = re.split(r'\s+', text)
-    del_names = [name.strip() for name in del_names if name.strip()]
+    del_names = [n for n in re.split(r'\s+', text) if n]
 
-    deleted = []
-    not_found = []
+    deleted, not_found = [], []
     for name in del_names:
         if name in name_list:
             name_list.remove(name)
@@ -130,9 +135,63 @@ async def delete_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if deleted:
         msg += "刪除成功：\n" + "\n".join(deleted) + "\n"
     if not_found:
-        msg += "以下名字不在名單中：\n" + "\n".join(not_found)
+        msg += "不在名單中：\n" + "\n".join(not_found)
     if not msg:
         msg = "沒有刪除任何名字。"
+
+    await send_and_record(update, context, msg)
+    return await back_to_menu(update, context)
+
+async def add_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global blacklist, name_list
+    import re
+    text = update.message.text.strip()
+    new_names = [n for n in re.split(r'\s+', text) if n]
+
+    added, existed, in_main_list = [], [], []
+    for name in new_names:
+        if name in name_list:
+            in_main_list.append(name)
+        elif name in blacklist:
+            existed.append(name)
+        else:
+            blacklist.append(name)
+            added.append(name)
+
+    msg = ""
+    if added:
+        msg += "已加入黑名單：\n" + "\n".join(added) + "\n"
+    if existed:
+        msg += "已在黑名單：\n" + "\n".join(existed) + "\n"
+    if in_main_list:
+        msg += "在名單中，無法加入黑名單：\n" + "\n".join(in_main_list)
+    if not msg:
+        msg = "沒有新增任何黑名單。"
+
+    await send_and_record(update, context, msg)
+    return await back_to_menu(update, context)
+
+async def delete_blacklist(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    global blacklist
+    import re
+    text = update.message.text.strip()
+    del_names = [n for n in re.split(r'\s+', text) if n]
+
+    deleted, not_found = [], []
+    for name in del_names:
+        if name in blacklist:
+            blacklist.remove(name)
+            deleted.append(name)
+        else:
+            not_found.append(name)
+
+    msg = ""
+    if deleted:
+        msg += "已刪除黑名單：\n" + "\n".join(deleted) + "\n"
+    if not_found:
+        msg += "不在黑名單中：\n" + "\n".join(not_found)
+    if not msg:
+        msg = "沒有刪除任何黑名單。"
 
     await send_and_record(update, context, msg)
     return await back_to_menu(update, context)
@@ -140,45 +199,40 @@ async def delete_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def clear_all(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = update.message.text.strip()
     if text == '是':
-        # 刪除之前所有機器人發送訊息
         chat_id = update.effective_chat.id
         bot = context.bot
         msg_ids = context.user_data.get('messages_to_delete', [])
-
         for msg_id in msg_ids:
             try:
                 await bot.delete_message(chat_id=chat_id, message_id=msg_id)
             except Exception:
-                # 可能訊息已被刪除或無法刪除，忽略錯誤
                 pass
-
-        context.user_data.clear()  # 清除對話狀態資料
-        # 保留名單和日期變數（是全域變數，不在user_data中）
+        context.user_data.clear()
         await bot.send_message(chat_id=chat_id, text="已清除之前的對話紀錄，名單和日期保留不變。")
     else:
         await send_and_record(update, context, "已取消清除動作。")
-
     return await back_to_menu(update, context)
 
 async def back_to_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    reply_keyboard = [['設定日期', '新增名單'], ['刪除名單', '顯示名單'], ['清除對話紀錄']]
-    await send_and_record(
-        update,
-        context,
-        "請選擇操作：",
-        reply_markup=ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True),
-    )
+    reply_keyboard = [
+        ['設定日期', '新增名單'],
+        ['刪除名單', '新增黑名單'],
+        ['刪除黑名單', '顯示名單'],
+        ['清除對話紀錄']
+    ]
+    await send_and_record(update, context, "請選擇操作：", reply_markup=ReplyKeyboardMarkup(reply_keyboard, resize_keyboard=True))
     return CHOOSING
 
 async def cancel(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        '已取消對話，謝謝使用！',
-        reply_markup=ReplyKeyboardRemove()
-    )
+    await update.message.reply_text('已取消對話，謝謝使用！', reply_markup=ReplyKeyboardRemove())
     return ConversationHandler.END
 
 if __name__ == '__main__':
-    app = ApplicationBuilder().token('8356155635:AAH8K7oILoLnuPyJPWnOuHlE0Zp_D52FRsU').build()
+    TOKEN = os.getenv("BOT_TOKEN")
+    if not TOKEN:
+        raise ValueError("請先在環境變數中設定 BOT_TOKEN")
+
+    app = ApplicationBuilder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start)],
@@ -187,11 +241,12 @@ if __name__ == '__main__':
             SET_DATE: [MessageHandler(filters.TEXT & ~filters.COMMAND, set_date)],
             ADD_NAMES: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_names)],
             DELETE_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_name)],
+            ADD_BLACKLIST: [MessageHandler(filters.TEXT & ~filters.COMMAND, add_blacklist)],
+            DELETE_BLACKLIST: [MessageHandler(filters.TEXT & ~filters.COMMAND, delete_blacklist)],
             CLEAR_ALL: [MessageHandler(filters.TEXT & ~filters.COMMAND, clear_all)],
         },
         fallbacks=[CommandHandler('cancel', cancel)],
     )
 
     app.add_handler(conv_handler)
-
     app.run_polling()
